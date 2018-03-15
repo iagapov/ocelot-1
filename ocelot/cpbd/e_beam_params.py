@@ -1,7 +1,10 @@
-__author__ = 'Sergey'
+'''
+radiation integrals c/o Sergey Tomin
+IBS c/o Ilya Agapov
+'''
+
 
 from scipy.integrate import simps
-
 from ocelot.common.globals import *
 from ocelot.cpbd.optics import trace_z, twiss
 from ocelot.cpbd.beam import *
@@ -34,9 +37,9 @@ def I5_ID(L, h0, lu, beta_xc, Dx0, Dxp0):
 
 def radiation_integrals(lattice, twiss_0, nsuperperiod = 1):
     #TODO: add I4 for rectangular magnets I4 = Integrate(2 Dx(z)*k(z)*h(z), Z)
-    
+
     n_points_element = 20
-    
+
     tws_elem = twiss_0
     (I1, I2, I3,I4, I5) = (0., 0., 0., 0., 0.)
     h = 0.
@@ -47,7 +50,7 @@ def radiation_integrals(lattice, twiss_0, nsuperperiod = 1):
             Z = []
             h = elem.angle/elem.l
 
-            for z in np.linspace(0, elem.l,num = n_points_element, endpoint=True):
+            for z in linspace(0, elem.l,num = n_points_element, endpoint=True):
                 tws_z = elem.transfer_map(z)*tws_elem
                 Dx.append(tws_z.Dx)
                 Z.append(z)
@@ -56,12 +59,12 @@ def radiation_integrals(lattice, twiss_0, nsuperperiod = 1):
                 Hinvariant.append(Hx)
             #H = array(h)
             H2 = h*h
-            H3 = np.abs(h*h*h)
-            I1 += h*simps(np.array(Dx), Z)
+            H3 = abs(h*h*h)
+            I1 += h*simps(array(Dx), Z)
             I2 += H2*elem.l  #simps(H2, Z)*nsuperperiod
             I3 += H3*elem.l  #simps(H3, Z)*nsuperperiod
-            I4 += h*(2*elem.k1 + H2)*simps(np.array(Dx), Z)
-            I5 += H3*simps(np.array(Hinvariant), Z)
+            I4 += h*(2*elem.k1 + H2)*simps(array(Dx), Z)
+            I5 += H3*simps(array(Hinvariant), Z)
         tws_elem = elem.transfer_map*tws_elem
     #if abs(tws_elem.beta_x - twiss_0.beta_x)>1e-7 or abs(tws_elem.beta_y - twiss_0.beta_y)>1e-7:
     #    print( "WARNING! Results may be wrong! radiation_integral() -> beta functions are not matching. ")
@@ -73,14 +76,14 @@ class EbeamParams:
         if beam.E == 0:
             exit("beam.E must be non zero!")
         self.E = beam.E
-        if tws0 == None: 
+        if tws0 == None:
             tws = twiss(lattice, Twiss(beam))
             self.tws0 = tws[0]
         else:
             #tws0.E = lattice.energy
-            self.tws0 = tws0 
+            self.tws0 = tws0
             tws = twiss(lattice, tws0)
-            
+
         self.lat = lattice
         (I1,I2,I3, I4, I5) = radiation_integrals(lattice, self.tws0 , nsuperperiod)
         self.I1 = I1
@@ -186,5 +189,209 @@ class EbeamParams:
         val += ( "\nsigma_x' =  " + str(self.sigma_xp*1e6) + " urad")
         val += ( "\nsigma_y' =  " + str(self.sigma_yp*1e6) + " urad\n")
         return val
-        
-    
+
+from scipy.integrate import simps
+
+
+'''
+Damping time and diffusion coefficients
+'''
+def damp_rad(tws, lat, beam):
+    eb = EbeamParams(lat, beam, nsuperperiod=1)
+
+    di = type('dampInfo', (), {})
+    #jx = 1.5
+    jx = 2.93
+    jy = 1.0
+    #jz = 1.5
+    jz = 0.06
+
+    T0 = beam.T0 # sec, revolution time
+
+    Cg = 8.846e-5 # m / Gev^3
+    Cu = 55. / 24. / sqrt(3.)
+    Cq = 3.823e-13
+    gam = 1000. * beam.E / (0.511)
+
+    hbar_c = 6.582 * 2.99e-8 # ev m
+
+    r = 23 * 36 / pi; # machine radius
+
+    s_irho_2 = [e.l / (e.l / e.angle)**2 for e in lat.sequence if e.__class__ in (SBend, RBend, Bend) and abs(e.angle) > 1.e-10]
+    s_irho_3 = [e.l / (e.l / e.angle)**3 for e in lat.sequence if e.__class__ in (SBend, RBend, Bend) and abs(e.angle) > 1.e-10]
+    l = tws[-1].s
+
+    irho2_av = np.sum(s_irho_2) / l
+    irho3_av = np.sum(s_irho_3) / l
+
+    print(irho2_av)
+    di.U0 = Cg * beam.E**4 * r * irho2_av # in GeV
+    di.tau_z = 1. / (jz * di.U0 / (2*beam.E * T0) )
+    di.tau_x = 1. / (jx * di.U0 / (2*beam.E * T0) )
+    di.tau_y = 1. / (jy * di.U0 / (2*beam.E * T0) )
+
+    di.Gx = 4. * (eb.I5 / eb.I2) * Cq * gam**2 / (di.tau_x * jx)
+    #di.Gx = 4. * (eb.I5 / irho2_av*l) * Cq * gam**2 / (di.tau_x * jx)
+    di.Ge = 3./2. * Cu * hbar_c * gam**3 * 1.e-9 * di.U0 / T0 * irho3_av /  irho2_av # in GeV^2
+
+    di.ex = di.Gx * di.tau_x / 4.
+    di.sige = sqrt(Cq * gam**2 * irho3_av  / jz / irho2_av)
+
+    return di
+
+
+
+
+from scipy.optimize import newton_krylov, broyden1, anderson, minimize
+from scipy import optimize
+'''
+equilibrium emittance including IBS
+'''
+def emit(tws, lat, beam):
+
+    di=damp_rad(tws, lat, beam)
+    # objective
+    def residual(x):
+        #global tws, lat, beam, di
+        beam2 = Beam(beam)
+        beam2.kappa_h = beam.kappa_h
+        beam2.kappa = beam.kappa
+        beam2.tlen = beam.tlen
+        beam2.E = beam.E
+        beam2.N = beam.N
+        beam2.emit_x = x[0]
+        beam2.emit_y = x[1]
+        beam2.sigma_E = x[2]
+        beam2.alpha = beam.alpha
+        beam2.ws = beam.ws
+
+        beam2.tlen = beam2.alpha * 2.99e8 / beam2.ws * beam2.sigma_E
+
+        r=ibs(tws, beam2, kappa_h=beam2.kappa_h)
+
+        ex2 = di.Gx / (1./di.tau_x - r.Thm) / 4.
+        ey2 = beam.kappa* di.Gx / (1./di.tau_y - r.Tvm) / 4.
+        ez2 = di.Ge / (1./di.tau_z - r.Tem) / 4.
+
+        if ex2 < 0 or ey2 < 0 or ez2 < 0 :
+            return 1.e9  #pen_max
+
+        fx = beam2.emit_x -  ex2
+        fy = beam2.emit_y -  ey2
+        ezm = (beam2.sigma_E * beam2.E)**2
+        fz =  ezm - ez2
+        #return np.array([fx**2,fy**2, fz**2])
+        return (fx* 1.e12)**2 + (fy*1.e12)**2 + (fz*1.e6)**2
+
+
+    guess = np.array([beam.emit_x, beam.emit_y, beam.sigma_E])
+    #sol = newton_krylov(residual, guess, method='lgmres', verbose=1, x_tol=1.e-2)
+    #sol = anderson(residual, guess, verbose=1, x_tol=1.e-2)
+    #sol = optimize.fmin(residual, guess, xtol=1.e-3,maxiter=10000, maxfun=10000)
+    sol = minimize(residual, guess, method='nelder-mead',options={'xtol': 1e-8, 'disp': False})
+
+    print("solution", sol)
+    print(sol["final_simplex"][0][0])
+
+    beam_mod  = Beam()
+    beam_mod.emit_x = sol["final_simplex"][0][0][0]
+    beam_mod.emit_y = sol["final_simplex"][0][0][1]
+    beam_mod.sigma_E = sol["final_simplex"][0][0][2]
+    beam_mod.tlen = beam.alpha *2.99e8 / beam.ws * beam_mod.sigma_E
+
+    return beam_mod
+
+
+
+
+'''
+IBS based on CIMP model (Kubo, Mtingwa and Wolski 2005)
+'''
+
+def g(x):
+    if x<0.25: return -4.336*log(x)
+    if x<0.8:  return 1./(x + 0.11)**1.6 + 1.2
+    return 2./x**(1.2) - 0.3
+
+
+def ibs(tws, beam, kappa_h=0.1):
+
+    sigp = beam.sigma_E
+    ex = beam.emit_x  # m
+    ey = beam.emit_y  # m
+    gam = beam.E * 1000./ 0.511
+    sigs = beam.tlen # m
+    N = beam.N
+    L = tws[-1].s
+
+
+    # if negative emittance passed, assume "very large" values
+    if ex < 1.e-20: ex = 1.e-1
+    if ey < 1.e-20: ey = 1.e-1
+    if sigp < 1.e-20: sigp = 1.e-1
+
+
+    print("start values ibs {} {} {}".format(ex,ey,sigp))
+
+    b0 = 10.0 # average beta function -- for Coulomb log
+
+    s = np.array([t.s for t in tws])
+    betx = np.array([t.beta_x for t in tws])
+    bety = np.array([t.beta_y for t in tws])
+    H = np.array([(1. + t.alpha_x**2)/ t.beta_x * t.Dx**2 + t.beta_x*t.Dxp**2 + 2*t.alpha_x*t.Dx*t.Dxp  for t in tws])
+
+    lattice_fudge = 1.0
+
+    y0 = (1./sigp)**2 + lattice_fudge * np.abs(H)/ex
+
+    y2 = 1. /sqrt(y0)
+    sigh = y2
+    a = sigh / gam * sqrt(betx/ex)
+    b = sigh / gam * sqrt(bety/ey)
+    g1 = [g(i) for i in b/a]
+    g2 = [g(i) for i in a/b]
+
+
+    kappa_c = 0.0
+    fudge = 1.0
+
+    #longitudinal
+    Fe = sigh**2/sigp**2 * (g1/a + g2/b)
+    #horizontal
+    Fx = -a*g1 + fudge * H * sigh**2 / ex * (g1/a + g2/b)
+    Fy = -b*g2 + fudge * kappa_h * H * sigh**2 / ey * (g1/a + g2/b)
+
+    r0 = 2.8179403e-15
+    r02c = 23.805e-22
+
+
+    A = (r02c * N ) / (64.0 * pi**2 * gam**4 * ex*ex*sigp*sigs)
+    LG = log( (gam**2 * ex * sqrt(b0 * ex)) / (r0 * b0) )
+
+    Tem = 2. * pi**(3./2.)* LG * A * simps(Fe,s) / L
+    Thm = 2. * pi**(3./2.)* LG * A * simps(Fx,s) / L
+    Tvm = 2. * pi**(3./2.)* LG * A * simps(Fy,s) / L
+
+
+    print('IBS rise times (x, y, E) [msec]:{} {} {}'.format(1000./Thm,1000./Tvm, 1000./Tem))
+    print('IBS rise rates [1/sec]:{} {}'.format(Thm, Tem))
+
+    ibsInfo = type('ibsInfo', (), {})
+    ibsInfo.Fe = Fe
+    ibsInfo.Fx = Fx
+    ibsInfo.Fy = Fy
+    ibsInfo.Thm = Thm
+    ibsInfo.Tvm = Tvm
+    ibsInfo.Tem = Tem
+
+    ibsInfo.sigh = sigh
+    ibsInfo.a = a
+    ibsInfo.b = b
+    ibsInfo.g1 = g1
+    ibsInfo.g2 = g2
+    ibsInfo.tws = tws
+    ibsInfo.s = s
+    ibsInfo.H = H
+
+
+    return ibsInfo
